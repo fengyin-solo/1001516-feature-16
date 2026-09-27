@@ -16,6 +16,19 @@ LIST_FIELDS = ["告警编号", "告警来源", "告警类型", "触发阈值", "
 STATUSES = ["待确认", "处置中", "已关闭", "已忽略"]
 
 
+@router.get("/stats")
+def get_stats() -> dict[str, Any]:
+    """告警统计：卡片取值、触发阈值快照与单位口径，和列表、详情同一份数据源。"""
+    return service.stats()
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出告警监测清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "alarm", "total": total, "items": items}
+
+
 @router.get("", response_model=PageResult[dict])
 def list_entries(
     keyword: str | None = Query(default=None, description="按告警编号检索"),
@@ -23,7 +36,7 @@ def list_entries(
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按告警编号与状态过滤告警监测列表；没有数据时返回空页，不报错。"""
+    """按告警编号与状态过滤告警监测列表；同一告警编号只保留最新一条，没有数据时返回空页。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
     items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
@@ -41,11 +54,20 @@ def get_entry(entry_id: int) -> dict:
 
 @router.post("", response_model=ActionResult)
 def create_entry(payload: EntryPayload) -> ActionResult:
-    """登记一条告警记录，缺字段时说明原因而不是静默丢弃。"""
-    entry, missing = service.create_entry(payload.values)
-    if missing:
-        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
-    return ActionResult(ok=True, message="告警记录已登记", entry=entry)
+    """登记一条告警记录：阈值联合校验不通过或缺字段时说明原因，同编号旧记录只留最新。"""
+    entry, problems = service.create_entry(payload.values)
+    if problems:
+        return ActionResult(ok=False, message="；".join(problems))
+    return ActionResult(ok=True, message="告警记录已登记，同一告警编号仅保留最新一条", entry=entry)
+
+
+@router.put("/{entry_id}", response_model=ActionResult)
+def update_entry(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """保存触发阈值修改：上下限、单位与生效范围一起校验，不通过就说明差在哪，不落库。"""
+    entry, problems = service.update_entry(entry_id, payload.values)
+    if entry is None:
+        return ActionResult(ok=False, message="；".join(problems))
+    return ActionResult(ok=True, message="触发阈值已保存，列表、详情与统计取值已同步", entry=entry)
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
@@ -56,10 +78,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出告警监测清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "alarm", "total": total, "items": items}
